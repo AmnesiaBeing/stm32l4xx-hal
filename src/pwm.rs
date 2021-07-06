@@ -2,10 +2,12 @@
 
 use core::marker::PhantomData;
 use core::mem;
+use core::ptr;
 
 use crate::hal;
 use crate::stm32::{TIM1, TIM15, TIM2};
 
+use crate::dma::{self, dma1, TransferPayload};
 use crate::gpio::gpioa::{PA0, PA1, PA10, PA11, PA15, PA2, PA3, PA8, PA9};
 use crate::gpio::gpiob::{PB10, PB11, PB14, PB3};
 use crate::gpio::{Alternate, AlternateOD, Floating, Input, Output, PushPull, AF1, AF14};
@@ -405,14 +407,109 @@ macro_rules! pwm_channels {
     }
 }
 
+pub struct PwmPayload<TIM, TIMCH> {
+    pwm: Pwm<TIM, TIMCH>,
+}
+
+pub type PwmDma<TIM, TIMCH, DMACH> = dma::TxDma<PwmPayload<TIM, TIMCH>, DMACH>;
+
+macro_rules! pwm_dma {
+    ($TIMX:ident: $(($TIMCH:ident, $ccr:ident, $ccXe:ident, $DMACH:path, $DMACHX:ident, $DMAMAPX:ident, $arr_width:ident),)+) => {
+        $(
+        // impl<TIMCH> dma::Transmit for PwmDma<$TIM, TIMCH, $DMACH> {
+        //     typ
+        // }
+
+            impl Pwm<$TIMX, $TIMCH> {
+                pub fn with_dma(self, mut channel: $DMACH) -> PwmDma<$TIMX, $TIMCH, $DMACH> {
+                    let payload = PwmPayload { pwm: self };
+
+                    channel.set_peripheral_address(
+                        unsafe { &(*$TIMX::ptr()).$ccr as *const _ as u32 },
+                        false,
+                    );
+
+                    channel.cselr().modify(|_, w| w.$DMACHX().$DMAMAPX());
+                    unsafe{
+                    channel.ccr().modify(|_, w| {
+                        w
+                            // memory to memory mode disabled
+                            .mem2mem()
+                            .clear_bit()
+                            // medium channel priority level
+                            .pl()
+                            .high()
+                            // ?-bit memory size
+                            .msize()
+                            .bits((($arr_width::BITS)/8 - 1) as u8)
+                            // how-to make a macro to change u32 to bits32()
+                            // ?-bit peripheral size
+                            .psize()
+                            .bits((($arr_width::BITS)/8 - 1) as u8)
+                            // circular mode disabled
+                            .circ()
+                            .clear_bit()
+                            // write to peripheral
+                            .dir()
+                            .set_bit()
+                    });
+                }
+
+                    PwmDma { payload, channel }
+                }
+            }
+
+            impl dma::TransferPayload for PwmDma<$TIMX, $TIMCH, $DMACH>
+            // where self.payload: hal::PwmPin
+            {
+                fn start(&mut self) {
+                    unsafe {
+                        // enable DMA trigger
+                        (*$TIMX::ptr()).dier.write(|w| w.tde().set_bit());
+                        // enable update DMA request
+                        (*$TIMX::ptr()).dier.write(|w| w.ude().set_bit());
+                    }
+                    // I dont know how to express like follow
+                    // self.payload.pwm as hal::PwmPin.enable();
+                    unsafe { (*$TIMX::ptr()).ccer.modify(|_, w| w.$ccXe().set_bit()) }
+                    self.channel.start();
+                }
+
+                fn stop(&mut self) {}
+            }
+        )+
+    }
+}
+
 advanced_timer! {
     TIM1: (tim1, tim1en, tim1rst, APB2, u16, u16),
+}
+
+pwm_dma! {
+    TIM1:   (C1, ccr1, cc1e, dma1::C6, c6s, map7, u16),
+            (C2, ccr2, cc2e, dma1::C6, c6s, map7, u16),
+            (C3, ccr3, cc3e, dma1::C6, c6s, map7, u16),
+            (C4, ccr4, cc4e, dma1::C6, c6s, map7, u16),
 }
 
 standard_timer! {
     TIM2: (tim2, tim2en, tim2rst, APB1R1, u16, u32),
 }
 
+pwm_dma! {
+    TIM2:   (C1, ccr1, cc1e, dma1::C2, c2s, map4, u32),
+            (C2, ccr2, cc2e, dma1::C2, c2s, map4, u32),
+            (C3, ccr3, cc3e, dma1::C2, c2s, map4, u32),
+            (C4, ccr4, cc4e, dma1::C2, c2s, map4, u32),
+}
+
 small_timer! {
     TIM15: (tim15, tim15en, tim15rst, APB2, u16, u16),
 }
+
+// pwm_dma! {
+//     TIM15:  (C1, ccr1, cc1e, dma1::C5, c5s, map7, u16),
+//             (C2, ccr2, cc2e, dma1::C5, c5s, map7, u16),
+//             (C3, ccr3, cc3e, dma1::C5, c5s, map7, u16),
+//             (C4, ccr4, cc4e, dma1::C5, c5s, map7, u16),
+// }
